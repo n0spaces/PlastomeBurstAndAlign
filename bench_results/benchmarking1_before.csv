@@ -1,0 +1,15 @@
+function,seconds
+(start),0.615
+ExtractAndCollect,0.207
+ExtractAndCollect.conduct_extraction,7.874424
+DataCleaning,0.172
+DataCleaning.remove_duplicate_annos,0.17959
+DataCleaning.remove_annos_if_below_minnumtaxa,0.719
+DataCleaning.remove_annos_if_below_minseqlength,0.10411
+DataCleaning.remove_orfs,0.262
+DataCleaning.remove_user_defined_genes,0.644
+AlignmentCoordination,0.219
+AlignmentCoordination.save_regions_as_unaligned_matrices,0.94124
+AlignmentCoordination.conduct_protein_MSA_and_backtranslate,13.452385
+AlignmentCoordination.collect_successful_MSAs,12.312673
+AlignmentCoordination.concatenate_successful_MSAs,3.990098

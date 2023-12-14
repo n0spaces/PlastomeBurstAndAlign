@@ -6,25 +6,24 @@ __version__ = "m_gruenstaeudl@fhsu.edu|Wed 22 Nov 2023 04:35:09 PM CST"
 # ------------------------------------------------------------------------------#
 # IMPORTS
 import argparse
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from Bio import SeqIO, Nexus, SeqRecord, AlignIO
 from Bio.Align import Applications  # line necessary; see: https://www.biostars.org/p/13099/
 from Bio.SeqFeature import FeatureLocation, CompoundLocation, ExactPosition
 import coloredlogs
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from copy import deepcopy
 from distutils.spawn import find_executable
 from io import StringIO
 import logging
 import multiprocessing
-from multiprocess.pool import Pool
 import os
 from re import sub
 import sys
 from Bio.Data.CodonTable import ambiguous_generic_by_id
 from Bio.Align import MultipleSeqAlignment
 from Bio.Seq import Seq
+import datetime
 
 # ------------------------------------------------------------------------------#
 # DEBUGGING HELP
@@ -42,61 +41,41 @@ class ExtractAndCollect:
         """
         self.select_mode = select_mode
         log.info("parsing GenBank flatfiles and extracting their sequence annotations")
-    
-    @staticmethod
-    def parse_file(f, in_dir, select_mode) -> tuple[OrderedDict[str, list[SeqRecord.SeqRecord]], OrderedDict[str, list[SeqRecord.SeqRecord]]]:
-        log.info(f"  parsing {f}")
-        rec = SeqIO.read(os.path.join(in_dir, f), "genbank")
-        # TO DO #
-        # Warning 'BiopythonWarning: Partial codon, len(sequence) not a multiple of three.' occurs in line above:
-        # Is there a way to suppress the warning in line above but activate a flag which would allow us to
-        # solve it in individual function?
 
-        nucls = OrderedDict()
-        prots = OrderedDict()
-
-        if select_mode == "cds":
-            ExtractAndCollect._extract_cds(rec, nucls, prots)
-        if select_mode == "igs":
-            ExtractAndCollect._extract_igs(rec, nucls)
-        if select_mode == "int":
-            main_odict_intron2 = OrderedDict()
-            ExtractAndCollect._extract_int(rec, main_odict_intron2, nucls)
-            nucls.update(main_odict_intron2)
-
-        if not nucls.items():
-            log.critical(f"No items in main dictionary: {out_dir}")
-            raise Exception()
-        
-        return (nucls, prots)
-
-    def conduct_extraction(self, in_dir, fileext) -> tuple[OrderedDict[str, list[SeqRecord.SeqRecord]], OrderedDict[str, list[SeqRecord.SeqRecord]]]:
+    def conduct_extraction(self, in_dir, fileext):
         """Conduct extraction
         INPUT:  input folder, user specification on cds/int/igs
         OUTPUT: nucleotide and protein dictionaries
         """
+        self.main_odict_nucl = OrderedDict()
+        self.main_odict_prot = OrderedDict() if self.select_mode == "cds" else None
+        main_odict_intron2 = OrderedDict() if self.select_mode == "int" else None
 
-        with Pool() as p:
-            files = filter(lambda f: f.endswith(fileext), os.listdir(in_dir))
-            result = p.starmap(ExtractAndCollect.parse_file, map(lambda f: (f, in_dir, self.select_mode), files))
+        files = [f for f in os.listdir(in_dir) if f.endswith(fileext)]
+        for f in files:
+            log.info(f"  parsing {f}")
+            rec = SeqIO.read(os.path.join(in_dir, f), "genbank")
+            # TO DO #
+            # Warning 'BiopythonWarning: Partial codon, len(sequence) not a multiple of three.' occurs in line above:
+            # Is there a way to suppress the warning in line above but activate a flag which would allow us to
+            # solve it in individual function?
 
-            # now merge all the dicts into self.main_odict_nucl and self.main_odict_prot
-            all_nucls = defaultdict(list)  # defaultdict returns [] if a key has no value
-            all_prots = defaultdict(list)
-            for nucls, prots in result:
-                for key in nucls.keys():
-                    all_nucls[key] += nucls[key]
-                for key in prots.keys():
-                    all_prots[key] += prots[key]
-            self.main_odict_nucl = OrderedDict(all_nucls)
-            self.main_odict_prot = OrderedDict(all_prots)
+            if self.select_mode == "cds":
+                self._extract_cds(rec)
+            if self.select_mode == "igs":
+                self._extract_igs(rec)
+            if self.select_mode == "int":
+                self._extract_int(rec, main_odict_intron2)
+                self.main_odict_nucl.update(main_odict_intron2)
 
+            if not self.main_odict_nucl.items():
+                log.critical(f"No items in main dictionary: {out_dir}")
+                raise Exception()
         return (self.main_odict_nucl, self.main_odict_prot)
 
-    @staticmethod
-    def _extract_cds(rec, nucls, prots):
+    def _extract_cds(self, rec):
         """Extracts all CDS (coding sequences = genes) from a given sequence record
-        OUTPUT: update nucls and prots dicts
+        OUTPUT: saves to global main_odict_nucl and to global main_odict_prot
         """
         for feature in rec.features:
             if feature.type == "CDS":
@@ -109,7 +88,12 @@ class ExtractAndCollect:
                     seq_rec = SeqRecord.SeqRecord(
                         seq_obj, id=seq_name, name="", description=""
                     )
-                    nucls[gene_name] = nucls.get(gene_name, []) + [seq_rec]
+                    if gene_name in self.main_odict_nucl.keys():
+                        tmp = self.main_odict_nucl[gene_name]
+                        tmp.append(seq_rec)
+                        self.main_odict_nucl[gene_name] = tmp
+                    else:
+                        self.main_odict_nucl[gene_name] = [seq_rec]
 
                     # Step 2. Translate nucleotide sequence to amino acid sequence
                     seq_obj = feature.extract(rec).seq.translate(
@@ -120,12 +104,16 @@ class ExtractAndCollect:
                     seq_rec = SeqRecord.SeqRecord(
                         seq_obj, id=seq_name, name="", description=""
                     )
-                    prots[gene_name] = prots.get(gene_name, []) + [seq_rec]
+                    if gene_name in self.main_odict_prot.keys():
+                        tmp = self.main_odict_prot[gene_name]
+                        tmp.append(seq_rec)
+                        self.main_odict_prot[gene_name] = tmp
+                    else:
+                        self.main_odict_prot[gene_name] = [seq_rec]
 
-    @staticmethod
-    def _extract_igs(rec, nucls):
+    def _extract_igs(self, rec):
         """Extracts all IGS (intergenic spacers) from a given sequence record
-        OUTPUT: update nucl ordered dict
+        OUTPUT: saves to global main_odict_nucl
         """
         # Step 1. Extract all genes from record (i.e., cds, trna, rrna)
         # Resulting list contains adjacent features in order of appearance on genome
@@ -181,18 +169,24 @@ class ExtractAndCollect:
                             )
                             continue
                     # Step 5. Make IGS SeqRecord
-                    seq_obj = exact_location.extract(rec).seq # type: ignore
+                    seq_obj = exact_location.extract(rec).seq
                     seq_name = igs_name + "_" + rec.name
                     seq_rec = SeqRecord.SeqRecord(
                         seq_obj, id=seq_name, name="", description=""
                     )
                     # Step 6. Attach seqrecord to growing dictionary
-                    if igs_name in nucls or inv_igs_name in nucls:
-                        nucls[igs_name] = nucls.get(igs_name, []) + [seq_rec]
-                        # if inv_igs_name in self.main_odict_nucl.keys():
-                        #     pass  # Don't count IGS in the IRs twice
+                    if (
+                        igs_name in self.main_odict_nucl.keys()
+                        or inv_igs_name in self.main_odict_nucl.keys()
+                    ):
+                        if igs_name in self.main_odict_nucl.keys():
+                            tmp = self.main_odict_nucl[igs_name]
+                            tmp.append(seq_rec)
+                            self.main_odict_nucl[igs_name] = tmp
+                        if inv_igs_name in self.main_odict_nucl.keys():
+                            pass  # Don't count IGS in the IRs twice
                     else:
-                        nucls[igs_name] = [seq_rec]
+                        self.main_odict_nucl[igs_name] = [seq_rec]
                 # Handle genes with compound locations
                 else:
                     log.warning(
@@ -202,10 +196,9 @@ class ExtractAndCollect:
                     )
                     continue
 
-    @staticmethod
-    def _extract_int(rec, main_odict_intron2, nucls):
+    def _extract_int(self, rec, main_odict_intron2):
         """Extracts all INT (introns) from a given sequence record
-        OUTPUT: update nucls and main_odict_intron2 ordered dicts
+        OUTPUT: saves to global main_odict_nucl
         """
         for feature in rec.features:
             if feature.type == "CDS" or feature.type == "tRNA":
@@ -256,10 +249,10 @@ class ExtractAndCollect:
                         seq_rec, gene_name = extract_internal_intron(
                             rec, feature, gene_name, 0
                         )
-                        if gene_name not in nucls:
-                            nucls[gene_name] = [seq_rec]
+                        if gene_name not in self.main_odict_nucl.keys():
+                            self.main_odict_nucl[gene_name] = [seq_rec]
                         else:
-                            nucls[gene_name].append(seq_rec)
+                            self.main_odict_nucl[gene_name].append(seq_rec)
                     except Exception as e:
                         some_id = list(feature.qualifiers.values())[0]
                         log.warning(
@@ -277,10 +270,10 @@ class ExtractAndCollect:
                         seq_rec, gene_name = extract_internal_intron(
                             rec, feature, gene_name, 0
                         )
-                        if gene_name not in nucls:
-                            nucls[gene_name] = [seq_rec]
+                        if gene_name not in self.main_odict_nucl.keys():
+                            self.main_odict_nucl[gene_name] = [seq_rec]
                         else:
-                            nucls[gene_name].append(seq_rec)
+                            self.main_odict_nucl[gene_name].append(seq_rec)
                     except Exception as e:
                         some_id = list(feature.qualifiers.values())[0]
                         log.critical(
@@ -312,7 +305,7 @@ class ExtractAndCollect:
 
 
 class DataCleaning:
-    def __init__(self, main_odict_nucl: OrderedDict[str, list[SeqRecord.SeqRecord]], main_odict_prot: OrderedDict[str, list[SeqRecord.SeqRecord]], select_mode):
+    def __init__(self, main_odict_nucl, main_odict_prot, select_mode):
         """Cleans the nucleotide and protein dictionaries
         INPUT:  nucleotide and protein dictionaries
         OUTPUT: nucleotide and protein dictionaries
@@ -431,11 +424,11 @@ class AlignmentCoordination:
             # Step 1. Align matrices via third-party alignment tool
             self._mafft_align(out_fn_unalign_nucl, out_fn_aligned_nucl, num_threads)
         ### Inner Function - End ###
-        # Step 2. Use multiprocess.Pool to parallelize alignment and back-translation
+        # Step 2. Use ThreadPoolExecutor to parallelize alignment and back-translation
         if self.main_odict_nucl.items():
-            with Pool(processes=num_threads) as p:
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 future_to_nucleotide = {
-                    p.apply(process_single_nucleotide_MSA, k, num_threads): k
+                    executor.submit(process_single_nucleotide_MSA, k, num_threads): k
                     for k in self.main_odict_nucl.keys()
                 }
                 for future in as_completed(future_to_nucleotide):
@@ -513,62 +506,50 @@ class AlignmentCoordination:
             hndl.write(stdout)
 
     def collect_successful_MSAs(self):
+        """Converts alignments to NEXUS format; then collect all successfully generated alignments
+        INPUT:  dictionary of region names
+        OUTPUT: list of alignments
+        """
         log.info("collecting all successful alignments")
         success_list = []
-        out_dir = 'your_output_directory'  # Update with the actual output directory
-
-        with Pool() as p:
-            # Adjust the number of concurrent processes as needed
-            results = p.map(AlignmentCoordination.convert_and_append, self.main_odict_nucl.keys())
-            success_list = list(filter(lambda r: r is not None, results))
-            return success_list
-            futures = dict(result)
-
-            for future in as_completed(futures):
-                k = futures[future]
-                try:
-                    result = future.result()
-                    if result:
-                        success_list.append(result)
-                except Exception as e:
-                    log.error(f"Error processing alignment for `{k}`: {e}")
-
+        for k in self.main_odict_nucl.keys():
+            # Step 1. Define input and output names
+            aligned_nucl_fasta = os.path.join(out_dir, f"nucl_{k}.aligned.fasta")
+            aligned_nucl_nexus = os.path.join(out_dir, f"nucl_{k}.aligned.nexus")
+            # Step 2. Convert FASTA alignment to NEXUS alignment
+            try:
+                AlignIO.convert(
+                    aligned_nucl_fasta,
+                    "fasta",
+                    aligned_nucl_nexus,
+                    "nexus",
+                    molecule_type="DNA",
+                )
+            except Exception as e:
+                log.warning(
+                    f"Unable to convert alignment of `{k}` from FASTA to NEXUS.\n"
+                    f"Error message: {e}"
+                )
+                continue  # skip to next k in loop, so that k is not included in success_list
+            # Step 3. Import NEXUS files and append to list for concatenation
+            try:
+                alignm_nexus = AlignIO.read(aligned_nucl_nexus, "nexus")
+                hndl = StringIO()
+                AlignIO.write(alignm_nexus, hndl, "nexus")
+                nexus_string = hndl.getvalue()
+                # The following line replaces the gene name of sequence name with 'concat_'
+                nexus_string = nexus_string.replace("\n" + k + "_", "\nconcat_")
+                alignm_nexus = Nexus.Nexus.Nexus(nexus_string)
+                success_list.append(
+                    (k, alignm_nexus)
+                )  # Function 'Nexus.Nexus.combine' needs a tuple.
+            except Exception as e:
+                log.warning(
+                    f"Unable to add alignment of `{k}` to concatenation.\n"
+                    f"Error message: {e}"
+                )
+                pass
         return success_list
-
-    @staticmethod
-    def convert_and_append(k):
-        aligned_nucl_fasta = os.path.join(out_dir, f"nucl_{k}.aligned.fasta")
-        aligned_nucl_nexus = os.path.join(out_dir, f"nucl_{k}.aligned.nexus")
-        
-        try:
-            AlignIO.convert(
-                aligned_nucl_fasta,
-                "fasta",
-                aligned_nucl_nexus,
-                "nexus",
-                molecule_type="DNA",
-            )
-        except Exception as e:
-            log.warning(
-                f"Unable to convert alignment of `{k}` from FASTA to NEXUS.\n"
-                f"Error message: {e}"
-            )
-            return None
-
-        try:
-            alignm_nexus = AlignIO.read(aligned_nucl_nexus, "nexus")
-            hndl = StringIO()
-            AlignIO.write(alignm_nexus, hndl, "nexus")
-            nexus_string = hndl.getvalue()
-            nexus_string = nexus_string.replace("\n" + k + "_", "\nconcat_")
-            alignm_nexus = Nexus.Nexus.Nexus(nexus_string) # type: ignore
-            return (k, alignm_nexus)
-        except Exception as e:
-            log.warning(
-                f"Unable to add alignment of `{k}` to concatenation.\n"
-                f"Error message: {e}"
-            )
-            return None
 
     def concatenate_successful_MSAs(self, success_list):
         log.info("concatenate all successful alignments (in no particular order)")
@@ -582,7 +563,7 @@ class AlignmentCoordination:
         )
         # Step 2. Do concatenation
         try:
-            alignm_concat = Nexus.Nexus.combine( # type: ignore
+            alignm_concat = Nexus.Nexus.combine(
                 success_list
             )  # Function 'Nexus.Nexus.combine' needs a tuple
         except Exception as e:
@@ -871,7 +852,7 @@ def main(args):
     profiler.next("AlignmentCoordination.concatenate_successful_MSAs")
     aligncoord.concatenate_successful_MSAs(success_list)
 
-    profiler.done('../timings.csv')
+    profiler.done('timings.csv')
     log.info("end of script\n")
     quit()
 
